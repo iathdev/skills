@@ -1,0 +1,136 @@
+[
+  {
+    "id": 1,
+    "name": "hardcoded-secret-detection",
+    "description": "Detects hardcoded API keys and secrets in source code",
+    "prompt": "Review this Go code for security issues:\n\n```go\nfunc NewPrepSSOClient() *PrepSSOClient {\n    return &PrepSSOClient{\n        apiKey:   \"sk-prep-live-abc123def456\",\n        endpoint: \"https://api.prep.vn/v1/sso\",\n        timeout:  10 * time.Second,\n    }\n}\n```",
+    "trap": "Model flags endpoint URL as an issue but misses or downgrades the hardcoded API key",
+    "assertions": [
+      {
+        "id": "1.1",
+        "text": "Flags hardcoded API key as CRITICAL"
+      },
+      {
+        "id": "1.2",
+        "text": "Suggests loading from environment variable via Viper config"
+      },
+      {
+        "id": "1.3",
+        "text": "Mentions risk of secret appearing in git history"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "missing-ownership-check-idor",
+    "description": "Detects missing ownership check allowing IDOR on user-owned resources",
+    "prompt": "Review this Go code for security issues:\n\n```go\nfunc (uc *CollectionUseCase) DeleteCollection(ctx context.Context, collectionID domain.CollectionID) error {\n    collection, err := uc.collectionRepo.GetByID(ctx, collectionID)\n    if err != nil {\n        return apperr.InternalServerError(\"collection.fetch_error\", err)\n    }\n    if collection == nil {\n        return apperr.NotFound(\"collection.not_found\")\n    }\n    if err := uc.collectionRepo.Delete(ctx, collectionID); err != nil {\n        return apperr.InternalServerError(\"collection.delete_error\", err)\n    }\n    return nil\n}\n```",
+    "trap": "Model sees the nil check and thinks the code is correct — misses that any authenticated user can delete any collection",
+    "assertions": [
+      {
+        "id": "2.1",
+        "text": "Flags missing ownership check as CRITICAL (IDOR vulnerability)"
+      },
+      {
+        "id": "2.2",
+        "text": "Notes that userID must be passed to the function and checked against collection.UserID"
+      },
+      {
+        "id": "2.3",
+        "text": "Suggests returning 404 (not 403) when ownership fails — to avoid leaking resource existence"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "name": "raw-error-exposed-to-client",
+    "description": "Detects internal error details leaked to API response",
+    "prompt": "Review this Go code for security issues:\n\n```go\nfunc (h *VocabHandler) ImportVocabulary(c *gin.Context) {\n    file, err := c.FormFile(\"file\")\n    if err != nil {\n        c.JSON(http.StatusBadRequest, gin.H{\n            \"success\": false,\n            \"error\": gin.H{\n                \"code\":    \"BAD_REQUEST\",\n                \"message\": fmt.Sprintf(\"Failed to read file: %v\", err),\n            },\n        })\n        return\n    }\n    // ... process file\n}\n```",
+    "trap": "Model sees the error handling and thinks it's fine — misses that err.Error() leaks internal details like file paths or system errors",
+    "assertions": [
+      {
+        "id": "3.1",
+        "text": "Flags raw error in response as HIGH (information disclosure)"
+      },
+      {
+        "id": "3.2",
+        "text": "Notes that err.Error() may contain file paths, OS details, or internal state"
+      },
+      {
+        "id": "3.3",
+        "text": "Suggests using response.BadRequest(c, 'common.bad_request') with i18n key instead"
+      },
+      {
+        "id": "3.4",
+        "text": "Also flags not using the unified response envelope (bypass of response helpers)"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "name": "missing-sql-ownership-scope",
+    "description": "Detects SQL query missing user_id scope on user-owned table",
+    "prompt": "Review this sqlc query for security issues:\n\n```sql\n-- name: GetCollectionByID :one\nSELECT id, user_id, name, description, created_at, updated_at\nFROM collections\nWHERE id = $1 AND deleted_at IS NULL;\n\n-- name: DeleteCollection :exec\nUPDATE collections SET deleted_at = NOW()\nWHERE id = $1 AND deleted_at IS NULL;\n```",
+    "trap": "Model approves the queries because they have deleted_at filter — misses that user-owned tables must scope by user_id at SQL layer",
+    "assertions": [
+      {
+        "id": "4.1",
+        "text": "Flags missing user_id in WHERE clause as CRITICAL (IDOR at SQL layer)"
+      },
+      {
+        "id": "4.2",
+        "text": "Both queries need AND user_id = $2 — not just the delete"
+      },
+      {
+        "id": "4.3",
+        "text": "References the IDOR guideline: user-owned tables MUST scope by user_id at SQL layer"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "name": "external-call-no-timeout-no-breaker",
+    "description": "Detects external HTTP call without timeout and circuit breaker",
+    "prompt": "Review this Go code for security issues:\n\n```go\nfunc (svc *PrepSSOService) ValidateToken(ctx context.Context, token string) (*PrepUser, error) {\n    client := &http.Client{}\n    req, err := http.NewRequest(\"GET\", svc.endpoint+\"/validate\", nil)\n    if err != nil {\n        return nil, err\n    }\n    req.Header.Set(\"Authorization\", \"Bearer \"+token)\n    resp, err := client.Do(req)\n    if err != nil {\n        return nil, err\n    }\n    defer resp.Body.Close()\n    // ... parse response\n}\n```",
+    "trap": "Model focuses on the missing ctx propagation but misses the bigger issues: no timeout and no circuit breaker",
+    "assertions": [
+      {
+        "id": "5.1",
+        "text": "Flags missing timeout on HTTP client as HIGH"
+      },
+      {
+        "id": "5.2",
+        "text": "Flags missing context propagation (should use http.NewRequestWithContext)"
+      },
+      {
+        "id": "5.3",
+        "text": "Suggests adding circuit breaker for external service resilience"
+      },
+      {
+        "id": "5.4",
+        "text": "Notes that without timeout, a slow external service can exhaust goroutines (DoS vector)"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "name": "sensitive-data-in-logs",
+    "description": "Detects PII or secrets being logged",
+    "prompt": "Review this Go code for security issues:\n\n```go\nfunc (svc *AuthService) AuthenticateSSO(ctx context.Context, ssoToken string) (*domain.User, string, error) {\n    logger.Info(ctx, \"[AUTH] SSO authentication attempt\", \"token\", ssoToken)\n    prepUser, err := svc.prepSSO.ValidateToken(ctx, ssoToken)\n    if err != nil {\n        logger.Error(ctx, \"[AUTH] SSO validation failed\", \"token\", ssoToken, \"err\", err)\n        return nil, \"\", apperr.Unauthorized(\"auth.sso_failed\")\n    }\n    logger.Info(ctx, \"[AUTH] SSO success\", \"email\", prepUser.Email, \"phone\", prepUser.Phone)\n    // ... create/update user, generate JWT\n}\n```",
+    "trap": "Model sees structured logging and thinks it's fine — misses that tokens and PII are being logged",
+    "assertions": [
+      {
+        "id": "6.1",
+        "text": "Flags logging SSO token as CRITICAL (secret in logs)"
+      },
+      {
+        "id": "6.2",
+        "text": "Flags logging email and phone as HIGH (PII in logs)"
+      },
+      {
+        "id": "6.3",
+        "text": "Suggests logging only non-sensitive identifiers (user_id, request_id) or masked values"
+      }
+    ]
+  }
+]

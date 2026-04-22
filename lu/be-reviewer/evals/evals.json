@@ -1,0 +1,132 @@
+[
+  {
+    "id": 1,
+    "name": "sql-injection-detection",
+    "description": "Detects SQL injection via string concatenation in raw pgx queries",
+    "prompt": "Review this Go code for issues:\n\n```go\nfunc (repo *UserRepo) SearchUsers(ctx context.Context, query string) ([]User, error) {\n    rows, err := repo.pool.Query(ctx, \"SELECT * FROM users WHERE name LIKE '%\"+query+\"%' ORDER BY created_at DESC\")\n    if err != nil {\n        return nil, err\n    }\n    defer rows.Close()\n    // ... scan rows\n}\n```",
+    "trap": "Model focuses on other issues (missing LIMIT, SELECT *) but misses the CRITICAL SQL injection vulnerability",
+    "assertions": [
+      {
+        "id": "1.1",
+        "text": "Flags SQL injection as CRITICAL severity"
+      },
+      {
+        "id": "1.2",
+        "text": "Identifies string concatenation with user input as the root cause"
+      },
+      {
+        "id": "1.3",
+        "text": "Suggests parameterized query with $1 placeholder as the fix"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "nil-dereference-after-repo-nil-nil",
+    "description": "Catches nil pointer dereference when repo returns (nil, nil) for not found",
+    "prompt": "Review this Go code for issues:\n\n```go\nfunc (uc *VocabUseCase) GetVocabulary(ctx context.Context, id domain.VocabularyID) (*dto.VocabularyResponse, error) {\n    vocab, err := uc.vocabRepo.GetByID(ctx, id)\n    if err != nil {\n        return nil, apperr.InternalServerError(\"vocabulary.fetch_error\", err)\n    }\n    return &dto.VocabularyResponse{\n        ID:   vocab.ID.UUID,\n        Name: vocab.Name,\n    }, nil\n}\n```",
+    "trap": "Model doesn't notice that when repo returns (nil, nil), the code dereferences vocab.ID on a nil pointer",
+    "assertions": [
+      {
+        "id": "2.1",
+        "text": "Flags nil dereference as HIGH severity"
+      },
+      {
+        "id": "2.2",
+        "text": "Explains that repo returns (nil, nil) for not found — err is nil but vocab is also nil"
+      },
+      {
+        "id": "2.3",
+        "text": "Suggests adding 'if vocab == nil { return nil, apperr.NotFound(...) }' check after error check"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "name": "missing-transaction-multi-write",
+    "description": "Detects multiple writes without transaction wrapper risking partial success",
+    "prompt": "Review this Go code for issues:\n\n```go\nfunc (uc *CollectionUseCase) CreateCollectionWithItems(ctx context.Context, userID domain.UserID, name string, vocabIDs []uuid.UUID) (*dto.CollectionResponse, error) {\n    collection, err := domain.NewCollection(userID, name)\n    if err != nil {\n        return nil, mapDomainError(err)\n    }\n    if err := uc.collectionRepo.Create(ctx, collection); err != nil {\n        return nil, apperr.InternalServerError(\"collection.create_error\", err)\n    }\n    for _, vid := range vocabIDs {\n        if err := uc.collectionItemRepo.Add(ctx, collection.ID, vid); err != nil {\n            return nil, apperr.InternalServerError(\"collection.add_item_error\", err)\n        }\n    }\n    return toCollectionResponse(collection), nil\n}\n```",
+    "trap": "Model focuses on the loop pattern (N+1) but misses that create + add items are not wrapped in a transaction",
+    "assertions": [
+      {
+        "id": "3.1",
+        "text": "Flags missing transaction as HIGH severity"
+      },
+      {
+        "id": "3.2",
+        "text": "Explains risk: if Add fails mid-loop, collection exists with partial items"
+      },
+      {
+        "id": "3.3",
+        "text": "Suggests wrapping in txManager.Execute"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "name": "apperror-in-repository",
+    "description": "Catches AppError usage inside repository layer — repos must return raw errors",
+    "prompt": "Review this Go code for issues:\n\n```go\nfunc (repo *FlashcardRepo) GetByID(ctx context.Context, id domain.FlashcardID) (*domain.Flashcard, error) {\n    q := getQueries(ctx, repo.queries)\n    row, err := q.GetFlashcardByID(ctx, id.UUID)\n    if err != nil {\n        if errors.Is(err, pgx.ErrNoRows) {\n            return nil, apperr.NotFound(\"flashcard.not_found\")\n        }\n        return nil, apperr.InternalServerError(\"flashcard.fetch_error\", err)\n    }\n    return mapToFlashcard(row), nil\n}\n```",
+    "trap": "Model approves the code because the error handling looks correct — but misses that repos must never return AppError",
+    "assertions": [
+      {
+        "id": "4.1",
+        "text": "Flags AppError in repository as HIGH severity (architecture violation)"
+      },
+      {
+        "id": "4.2",
+        "text": "Explains the convention: repos return (nil, nil) for not found, raw error otherwise"
+      },
+      {
+        "id": "4.3",
+        "text": "Use case is responsible for wrapping into AppError"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "name": "business-logic-in-handler",
+    "description": "Detects business logic leaking into the handler layer",
+    "prompt": "Review this Go code for issues:\n\n```go\nfunc (h *CollectionHandler) UpdateCollection(c *gin.Context) {\n    userID := c.MustGet(\"user_id\").(domain.UserID)\n    collectionID, ok := parseCollectionID(c)\n    if !ok {\n        return\n    }\n    var req dto.UpdateCollectionRequest\n    if err := c.ShouldBindJSON(&req); err != nil {\n        response.ValidationError(c, err)\n        return\n    }\n    // Check if collection exists and belongs to user\n    existing, err := h.collectionRepo.GetByID(c.Request.Context(), collectionID)\n    if err != nil {\n        response.HandleError(c, apperr.InternalServerError(\"common.internal_error\", err))\n        return\n    }\n    if existing == nil || existing.UserID != userID {\n        response.NotFound(c, \"collection.not_found\")\n        return\n    }\n    // Update name if changed\n    if req.Name != \"\" && req.Name != existing.Name {\n        existing.Name = strings.TrimSpace(req.Name)\n    }\n    res, err := h.useCase.UpdateCollection(c.Request.Context(), existing)\n    if err != nil {\n        response.HandleError(c, err)\n        return\n    }\n    response.Success(c, http.StatusOK, res)\n}\n```",
+    "trap": "Model only flags minor style issues but misses that the handler is doing ownership check, repo call, and field mutation — all business logic",
+    "assertions": [
+      {
+        "id": "5.1",
+        "text": "Flags handler calling repo directly as MEDIUM architecture violation"
+      },
+      {
+        "id": "5.2",
+        "text": "Flags ownership check in handler — should be in use case"
+      },
+      {
+        "id": "5.3",
+        "text": "Flags field mutation (existing.Name = ...) in handler — should be in use case or domain method"
+      },
+      {
+        "id": "5.4",
+        "text": "Suggests handler should only: bind input, call useCase.UpdateCollection(ctx, userID, collectionID, req), send response"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "name": "n-plus-one-query",
+    "description": "Detects N+1 query pattern in a loop",
+    "prompt": "Review this Go code for issues:\n\n```go\nfunc (uc *TopicUseCase) ListTopicsWithVocabCount(ctx context.Context) ([]dto.TopicWithCount, error) {\n    topics, err := uc.topicRepo.ListAll(ctx)\n    if err != nil {\n        return nil, apperr.InternalServerError(\"topic.fetch_error\", err)\n    }\n    result := make([]dto.TopicWithCount, 0, len(topics))\n    for _, t := range topics {\n        count, err := uc.vocabRepo.CountByTopicID(ctx, t.ID)\n        if err != nil {\n            return nil, apperr.InternalServerError(\"topic.count_error\", err)\n        }\n        result = append(result, dto.TopicWithCount{Topic: toTopicDTO(t), VocabCount: count})\n    }\n    return result, nil\n}\n```",
+    "trap": "Model approves the code as correct — misses the N+1 performance problem",
+    "assertions": [
+      {
+        "id": "6.1",
+        "text": "Flags N+1 query as MEDIUM performance issue"
+      },
+      {
+        "id": "6.2",
+        "text": "Explains: 1 query for topics + N queries for counts = N+1 round trips"
+      },
+      {
+        "id": "6.3",
+        "text": "Suggests batch query (e.g. BatchCountVocabulary) or JOIN to get counts in a single query"
+      }
+    ]
+  }
+]

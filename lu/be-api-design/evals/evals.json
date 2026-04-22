@@ -1,0 +1,148 @@
+[
+  {
+    "id": 1,
+    "name": "response-envelope-consistency",
+    "description": "All endpoints use the unified response envelope with success/data/error/meta fields",
+    "prompt": "Write a Gin handler for GET /api/v1/grammar-points that returns a paginated list of grammar points. Each grammar point has ID (uuid), Name (string, i18n), Level (string), and Description (string, i18n). Support page/page_size query params. Include error handling for invalid pagination params.",
+    "trap": "Model returns raw JSON without the unified envelope (success, data, error, meta) or forgets pagination in meta",
+    "assertions": [
+      {
+        "id": "1.1",
+        "text": "Uses response.SuccessList() for the success path — not raw c.JSON with hand-built envelope"
+      },
+      {
+        "id": "1.2",
+        "text": "Uses response.HandleError() or response.BadRequest() for error paths — not c.JSON with error"
+      },
+      {
+        "id": "1.3",
+        "text": "Pagination meta includes type, total, page, page_size, total_pages"
+      },
+      {
+        "id": "1.4",
+        "text": "Error messages are i18n keys (e.g. 'common.bad_request'), not English strings"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "handler-thin-adapter",
+    "description": "Handler only binds input and calls use case — zero business logic",
+    "prompt": "Write a Gin handler for POST /api/v1/collections that creates a new vocabulary collection. The collection needs a name (required, trimmed), optional description, and the authenticated user's ID. Validate that name is not empty after trimming, check for duplicate names, and return 201 on success.",
+    "trap": "Model puts duplicate-check logic or name normalization in the handler instead of delegating to the use case",
+    "assertions": [
+      {
+        "id": "2.1",
+        "text": "Handler only does: extract user_id from context, bind/validate input, call use case, send response"
+      },
+      {
+        "id": "2.2",
+        "text": "Duplicate check happens in use case, not handler — handler just calls response.HandleError on the returned error"
+      },
+      {
+        "id": "2.3",
+        "text": "Uses c.MustGet('user_id').(domain.UserID) for authenticated user"
+      },
+      {
+        "id": "2.4",
+        "text": "Returns response.Success(c, http.StatusCreated, result) on success"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "name": "path-param-domain-parse",
+    "description": "Path param IDs use domain.ParseXxxID, not raw uuid.Parse",
+    "prompt": "Write a Gin handler for DELETE /api/v1/collections/:collection_id that deletes a user's collection. The handler needs to parse the collection_id from the URL, verify ownership, and return appropriate responses.",
+    "trap": "Model uses uuid.Parse(c.Param('collection_id')) directly instead of domain.ParseCollectionID",
+    "assertions": [
+      {
+        "id": "3.1",
+        "text": "Uses domain.ParseCollectionID(c.Param('collection_id')) — not uuid.Parse"
+      },
+      {
+        "id": "3.2",
+        "text": "Returns 404 (not 400) when ParseCollectionID fails — don't reveal ID format to attackers"
+      },
+      {
+        "id": "3.3",
+        "text": "Ownership check delegated to use case, not done in handler"
+      },
+      {
+        "id": "3.4",
+        "text": "Returns response.Success(c, http.StatusOK, nil) on successful delete"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "name": "cursor-pagination-for-feeds",
+    "description": "Feed/timeline endpoints use cursor pagination, not offset",
+    "prompt": "Write a Gin handler for GET /api/v1/learning/activity-feed that returns the user's recent learning activities. Activities are generated frequently and new ones appear in real-time. Support pagination. Each activity has ID, Type, VocabularyID, Timestamp, and Details.",
+    "trap": "Model uses offset pagination (page/page_size) instead of cursor pagination for a real-time feed where items shift",
+    "assertions": [
+      {
+        "id": "4.1",
+        "text": "Uses cursor-based pagination (cursor + limit params), not offset (page + page_size)"
+      },
+      {
+        "id": "4.2",
+        "text": "Uses response.SuccessCursorList() with CursorPaginationMeta"
+      },
+      {
+        "id": "4.3",
+        "text": "Cursor is opaque (encoded) — not a raw timestamp or ID exposed to client"
+      },
+      {
+        "id": "4.4",
+        "text": "Meta includes next_cursor, has_next, limit"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "name": "dto-primitive-types",
+    "description": "API DTOs use primitive types, not domain typed IDs",
+    "prompt": "Write request and response DTOs for a vocabulary detail endpoint GET /api/v1/vocabulary/:vocabulary_id. The vocabulary has VocabularyID (typed domain ID), TopicID (typed domain ID), ProficiencyLevelID (typed domain ID), Simplified, Traditional, Pinyin, and translations. Include the DTO struct and a mapping function from domain entity to response DTO.",
+    "trap": "Model uses domain.VocabularyID, domain.TopicID in the response DTO instead of uuid.UUID / primitive types",
+    "assertions": [
+      {
+        "id": "5.1",
+        "text": "Response DTO uses uuid.UUID for ID fields — not domain.VocabularyID or domain.TopicID"
+      },
+      {
+        "id": "5.2",
+        "text": "Mapping function unwraps typed IDs: entity.ID.UUID, entity.TopicID.UUID"
+      },
+      {
+        "id": "5.3",
+        "text": "JSON tags use snake_case"
+      },
+      {
+        "id": "5.4",
+        "text": "Domain typed IDs stay inside the hexagon — only primitives cross the boundary"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "name": "slice-input-unique-validation",
+    "description": "Slice inputs in request DTOs have binding tags to reject duplicates",
+    "prompt": "Write a request DTO and handler for PATCH /api/v1/learning/preferences that updates the user's selected topic_ids (array of UUIDs). The user can select multiple topics but should not send duplicates.",
+    "trap": "Model accepts []uuid.UUID without unique validation binding tag, allowing duplicate topic IDs",
+    "assertions": [
+      {
+        "id": "6.1",
+        "text": "TopicIDs field has binding tag with 'unique' — e.g. binding:\"required,dive\" with unique or similar"
+      },
+      {
+        "id": "6.2",
+        "text": "Uses ShouldBindJSON and handles binding errors via response.ValidationError"
+      },
+      {
+        "id": "6.3",
+        "text": "422 returned for duplicate topic_ids, not silently deduplicated in use case"
+      }
+    ]
+  }
+]

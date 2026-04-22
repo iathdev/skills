@@ -1,0 +1,160 @@
+[
+  {
+    "id": 1,
+    "name": "domain-no-framework-imports",
+    "description": "Domain entities must not import Gin, pgx, sqlc, or any adapter/infra package",
+    "prompt": "Write a domain entity for a 'Flashcard' feature. A Flashcard belongs to a Collection (by CollectionID) and references a Vocabulary (by VocabularyID). It has front text, back text, difficulty level (1-5), next review date, and review count. Include validation: front/back cannot be empty, difficulty must be 1-5. The entity will be stored in PostgreSQL via sqlc.",
+    "trap": "Model imports pgx types for next_review_date, adds json/db struct tags, or imports from adapter/ package",
+    "assertions": [
+      {
+        "id": "1.1",
+        "text": "Domain file imports only stdlib + uuid — no gin, pgx, sqlc, gorm, or adapter imports"
+      },
+      {
+        "id": "1.2",
+        "text": "No json:, db:, or framework struct tags on domain entity"
+      },
+      {
+        "id": "1.3",
+        "text": "Uses time.Time for dates — not pgtype.Timestamptz or sql.NullTime"
+      },
+      {
+        "id": "1.4",
+        "text": "References other aggregates by typed ID (CollectionID, VocabularyID) not raw uuid.UUID"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "rich-domain-entity",
+    "description": "Entity has factory constructor, validation, and business methods — not anemic",
+    "prompt": "Write a domain entity for 'StudySession'. A user starts a session for a collection, reviews flashcards, and ends the session. Track: session ID, user ID, collection ID, started_at, ended_at, cards_reviewed count, cards_correct count, and status (in_progress, completed, abandoned). Include all necessary domain logic.",
+    "trap": "Model creates a plain struct with exported fields and no methods — anemic domain model where use case does all the logic",
+    "assertions": [
+      {
+        "id": "2.1",
+        "text": "Has a factory constructor (NewStudySession) that validates inputs and sets initial state"
+      },
+      {
+        "id": "2.2",
+        "text": "Has business methods like Complete(), Abandon(), RecordReview(correct bool) that enforce invariants"
+      },
+      {
+        "id": "2.3",
+        "text": "Status transitions are guarded — cannot complete an already-abandoned session"
+      },
+      {
+        "id": "2.4",
+        "text": "Error sentinels defined in domain (errors.New) — not AppError"
+      },
+      {
+        "id": "2.5",
+        "text": "cards_correct cannot exceed cards_reviewed — invariant enforced in domain"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "name": "repository-returns-raw-errors",
+    "description": "Repository returns raw errors and (nil, nil) for not found — never AppError",
+    "prompt": "Write a repository implementation for the Flashcard entity using sqlc. Implement Create, GetByID, ListByCollectionID, and Delete methods. The repository port interface is already defined. Handle not-found cases and database errors appropriately.",
+    "trap": "Model wraps errors in AppError (apperr.NotFound, apperr.InternalServerError) inside the repository",
+    "assertions": [
+      {
+        "id": "3.1",
+        "text": "Returns (nil, nil) when row not found — not apperr.NotFound"
+      },
+      {
+        "id": "3.2",
+        "text": "Returns raw error on DB failure — not apperr.InternalServerError"
+      },
+      {
+        "id": "3.3",
+        "text": "Uses getQueries(ctx, repo.queries) for transaction propagation"
+      },
+      {
+        "id": "3.4",
+        "text": "Maps between sqlc DB types and domain types — repo accepts/returns domain entities"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "name": "usecase-orchestrates-not-owns-logic",
+    "description": "Use case calls domain methods for business logic, maps errors, and wraps transactions",
+    "prompt": "Write a use case for completing a study session. The user provides their session_id. The use case should: verify the session exists and belongs to the user, complete the session, and return the final stats. Handle all error cases.",
+    "trap": "Model puts status-transition logic and validation in the use case instead of calling domain entity methods",
+    "assertions": [
+      {
+        "id": "4.1",
+        "text": "Calls session.Complete() domain method — does not set status directly in use case"
+      },
+      {
+        "id": "4.2",
+        "text": "Checks ownership via domain method (session.IsOwnedBy(userID)) — returns 404 if false"
+      },
+      {
+        "id": "4.3",
+        "text": "Maps domain error sentinels to AppError via mapDomainError() switch"
+      },
+      {
+        "id": "4.4",
+        "text": "Repo returns (nil, nil) → use case returns apperr.NotFound(key)"
+      },
+      {
+        "id": "4.5",
+        "text": "Repo returns (nil, err) → use case returns apperr.InternalServerError(key, err)"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "name": "typed-id-pattern",
+    "description": "Aggregate roots use typed IDs with NewXxxID and ParseXxxID constructors",
+    "prompt": "Write the domain types for a new 'Deck' aggregate root. A Deck is a shareable collection of flashcards with an owner. Define the DeckID type, its constructors, and the Deck entity with basic fields (name, description, owner_id, is_public, created_at).",
+    "trap": "Model uses raw uuid.UUID as the ID type instead of a typed wrapper struct",
+    "assertions": [
+      {
+        "id": "5.1",
+        "text": "DeckID is a struct wrapping uuid.UUID — not a type alias or raw UUID"
+      },
+      {
+        "id": "5.2",
+        "text": "Has NewDeckID() that generates UUIDv7"
+      },
+      {
+        "id": "5.3",
+        "text": "Has ParseDeckID(string) that validates and returns typed ID with domain error sentinel"
+      },
+      {
+        "id": "5.4",
+        "text": "Owner reference uses domain.UserID — not raw uuid.UUID"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "name": "transaction-in-usecase",
+    "description": "Multi-write operations wrapped in txManager.Execute",
+    "prompt": "Write a use case for creating a study session that also records the initial flashcard set. Creating a session involves: 1) create the session record, 2) create session_flashcard records for each card in the collection. Both must succeed or fail together.",
+    "trap": "Model calls repo.CreateSession and repo.CreateSessionFlashcards sequentially without a transaction wrapper",
+    "assertions": [
+      {
+        "id": "6.1",
+        "text": "Wraps both writes in txManager.Execute(ctx, func(ctx) error { ... })"
+      },
+      {
+        "id": "6.2",
+        "text": "Both repo calls receive the ctx from the transaction closure"
+      },
+      {
+        "id": "6.3",
+        "text": "If either write fails, the transaction rolls back automatically"
+      },
+      {
+        "id": "6.4",
+        "text": "Domain entity creation (NewStudySession) happens before the transaction — no domain logic inside tx"
+      }
+    ]
+  }
+]
